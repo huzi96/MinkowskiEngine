@@ -103,6 +103,7 @@ from MinkowskiConvolution import (
     MinkowskiConvolutionTransposeFunction,
     MinkowskiConvolutionTranspose,
     MinkowskiGenerativeConvolutionTranspose,
+    MinkowskiNormalizedConvolution,
 )
 
 
