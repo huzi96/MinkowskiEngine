@@ -480,7 +480,7 @@ class MinkowskiNormalizedConvolution(MinkowskiConvolutionBase):
             dimension=dimension,
         )
         self.reset_parameters()
-        self.detach_denorm = detach_denorm
+        self.detach_denorm = denorm_detach
 
     def forward(
         self,
