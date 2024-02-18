@@ -357,6 +357,324 @@ class MinkowskiConvolutionBase(MinkowskiModuleBase):
         return self.__class__.__name__ + s
 
 
+class MinkowskiSeparableConvolutionBase(MinkowskiModuleBase):
+
+    __slots__ = (
+        "in_channels",
+        "out_channels",
+        "is_transpose",
+        "kernel_generator",
+        "dimension",
+        "use_mm",
+        "kernel",
+        "bias",
+        "conv",
+    )
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size=-1,
+        stride=1,
+        dilation=1,
+        bias=False,
+        kernel_generator=None,
+        is_transpose=False,  # only the base class has this argument
+        expand_coordinates=False,
+        convolution_mode=ConvolutionMode.DEFAULT,
+        dimension=-1,
+    ):
+        r"""
+
+        .. note::
+
+           When the kernel generator is provided, all kernel related arguments
+           (kernel_size, stride, dilation) will be ignored.
+
+        """
+        super(MinkowskiSeparableConvolutionBase, self).__init__()
+        assert (
+            dimension > 0
+        ), f"Invalid dimension. Please provide a valid dimension argument. dimension={dimension}"
+        assert dimension == 3, "Separable convolution is only supported for 3D."
+        assert kernel_generator is None, "Separable convolution does not support custom kernel generator."
+        if kernel_generator is None:
+            kernel_generator = KernelGenerator(
+                kernel_size=kernel_size,
+                stride=stride,
+                dilation=dilation,
+                expand_coordinates=expand_coordinates,
+                dimension=dimension,
+            )
+        else:
+            kernel_generator.expand_coordinates = expand_coordinates
+
+        self.is_transpose = is_transpose
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+
+        self.kernel_generator = kernel_generator
+        self.dimension = dimension
+        self.use_mm = False  # use matrix multiplication when kernel_volume is 1
+
+        Tensor = torch.FloatTensor
+        if (
+            self.kernel_generator.kernel_volume == 1
+            and self.kernel_generator.requires_strided_coordinates
+        ):
+            kernel_shape = (self.in_channels, self.out_channels)
+            self.use_mm = True
+        else:
+            color_kernel_shape = (
+                self.kernel_generator.kernel_volume,
+                self.in_channels,
+                self.out_channels,
+            )
+            geom_kernel_shape = (
+                self.kernel_generator.kernel_volume,
+                self.in_channels,
+                3
+            )
+        if self.use_mm:
+            self.kernel = Parameter(Tensor(*kernel_shape))
+        else:
+            self.kernel_geom = Parameter(Tensor(*geom_kernel_shape))
+            feat_kernel_shape_2d = (
+                kernel_size, kernel_size, self.in_channels, self.out_channels)
+            self.kernel_feat_x = Parameter(
+                Tensor(*feat_kernel_shape_2d))
+            self.kernel_feat_y = Parameter(
+                Tensor(*feat_kernel_shape_2d))
+            self.kernel_feat_z = Parameter(
+                Tensor(*feat_kernel_shape_2d))
+        
+        self.bias = Parameter(Tensor(1, out_channels)) if bias else None
+        self.convolution_mode = convolution_mode
+        self.conv = (
+            MinkowskiConvolutionTransposeFunction()
+            if is_transpose
+            else MinkowskiConvolutionFunction()
+        )
+        self.kernel_size = kernel_size
+
+    def forward(
+        self,
+        input: SparseTensor,
+        coordinates: Union[torch.Tensor, CoordinateMapKey, SparseTensor] = None,
+    ):
+        r"""
+        :attr:`input` (`MinkowskiEngine.SparseTensor`): Input sparse tensor to apply a
+        convolution on.
+
+        :attr:`coordinates` ((`torch.IntTensor`, `MinkowskiEngine.CoordinateMapKey`,
+        `MinkowskiEngine.SparseTensor`), optional): If provided, generate
+        results on the provided coordinates. None by default.
+
+        """
+        assert isinstance(input, SparseTensor)
+        assert input.D == self.dimension
+
+        if self.use_mm:
+            # If the kernel_size == 1, the convolution is simply a matrix
+            # multiplication
+            out_coordinate_map_key = input.coordinate_map_key
+            outfeat = input.F.mm(self.kernel_geom)
+        else:
+            # Get a new coordinate_map_key or extract one from the coords
+            out_coordinate_map_key = _get_coordinate_map_key(
+                input, coordinates, self.kernel_generator.expand_coordinates
+            )
+            geom_feat = self.conv.apply(
+                torch.ones_like(input.F),
+                self.kernel_geom,
+                self.kernel_generator,
+                self.convolution_mode,
+                input.coordinate_map_key,
+                out_coordinate_map_key,
+                input._manager,
+            )
+            assert geom_feat.shape[1] == 3
+            kernel_x_expanded = self.kernel_feat_x.unsqueeze(2).expand(
+                -1, -1, self.kernel_size, -1, -1).contiguous().view(
+                    self.kernel_size ** 3, self.in_channels, self.out_channels
+                )
+            kernel_y_expanded = self.kernel_feat_y.unsqueeze(1).expand(
+                -1, self.kernel_size, -1, -1, -1).contiguous().view(
+                    self.kernel_size ** 3, self.in_channels, self.out_channels
+                )
+            kernel_z_expanded = self.kernel_feat_z.unsqueeze(0).expand(
+                self.kernel_size, -1, -1, -1, -1).contiguous().view(
+                    self.kernel_size ** 3, self.in_channels, self.out_channels
+                )
+            
+            feat_x = self.conv.apply(
+                input.F,
+                kernel_x_expanded,
+                self.kernel_generator,
+                self.convolution_mode,
+                input.coordinate_map_key,
+                out_coordinate_map_key,
+                input._manager,
+            )
+            feat_y = self.conv.apply(
+                input.F,
+                kernel_y_expanded,
+                self.kernel_generator,
+                self.convolution_mode,
+                input.coordinate_map_key,
+                out_coordinate_map_key,
+                input._manager,
+            )
+            feat_z = self.conv.apply(
+                input.F,
+                kernel_z_expanded,
+                self.kernel_generator,
+                self.convolution_mode,
+                input.coordinate_map_key,
+                out_coordinate_map_key,
+                input._manager,
+            )
+            outfeat = (feat_x * geom_feat[:, 0:1] + 
+                       feat_y * geom_feat[:, 1:2] +
+                       feat_z * geom_feat[:, 2:3])
+
+        if self.bias is not None:
+            outfeat += self.bias
+
+        return SparseTensor(
+            outfeat,
+            coordinate_map_key=out_coordinate_map_key,
+            coordinate_manager=input._manager,
+        )
+
+    def reset_parameters(self, is_transpose=False):
+        with torch.no_grad():
+            n = (
+                self.out_channels if is_transpose else self.in_channels
+            ) * self.kernel_generator.kernel_volume
+            stdv = 1.0 / math.sqrt(n)
+            if self.bias is not None:
+                self.bias.data.uniform_(-stdv, stdv)
+            if self.use_mm:
+                self.kernel.data.uniform_(-stdv, stdv)
+            else:
+                self.kernel_geom.data.uniform_(-stdv, stdv)
+                self.kernel_feat_x.data.uniform_(-stdv, stdv)
+                self.kernel_feat_y.data.uniform_(-stdv, stdv)
+                self.kernel_feat_z.data.uniform_(-stdv, stdv)
+
+    def __repr__(self):
+        s = "(in={}, out={}, ".format(
+            self.in_channels,
+            self.out_channels,
+        )
+        if self.kernel_generator.region_type in [RegionType.CUSTOM]:
+            s += "region_type={}, kernel_volume={}, ".format(
+                self.kernel_generator.region_type, self.kernel_generator.kernel_volume
+            )
+        else:
+            s += "kernel_size={}, ".format(self.kernel_generator.kernel_size)
+        s += "stride={}, dilation={})".format(
+            self.kernel_generator.kernel_stride,
+            self.kernel_generator.kernel_dilation,
+        )
+        return self.__class__.__name__ + s
+
+class MinkowskiSeparableConvolution(MinkowskiSeparableConvolutionBase):
+    r"""Convolution layer for a sparse tensor.
+
+
+    .. math::
+
+        \mathbf{x}_\mathbf{u} = \sum_{\mathbf{i} \in \mathcal{N}^D(\mathbf{u}, K,
+        \mathcal{C}^\text{in})} W_\mathbf{i} \mathbf{x}_{\mathbf{i} +
+        \mathbf{u}} \;\text{for} \; \mathbf{u} \in \mathcal{C}^\text{out}
+
+    where :math:`K` is the kernel size and :math:`\mathcal{N}^D(\mathbf{u}, K,
+    \mathcal{C}^\text{in})` is the set of offsets that are at most :math:`\left
+    \lceil{\frac{1}{2}(K - 1)} \right \rceil` away from :math:`\mathbf{u}`
+    definied in :math:`\mathcal{S}^\text{in}`.
+
+    .. note::
+        For even :math:`K`, the kernel offset :math:`\mathcal{N}^D`
+        implementation is different from the above definition. The offsets
+        range from :math:`\mathbf{i} \in [0, K)^D, \; \mathbf{i} \in
+        \mathbb{Z}_+^D`.
+
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size=-1,
+        stride=1,
+        dilation=1,
+        bias=False,
+        kernel_generator=None,
+        expand_coordinates=False,
+        convolution_mode=ConvolutionMode.DEFAULT,
+        dimension=None,
+        **kwargs
+    ):
+        r"""convolution on a sparse tensor
+
+        Args:
+            :attr:`in_channels` (int): the number of input channels in the
+            input tensor.
+
+            :attr:`out_channels` (int): the number of output channels in the
+            output tensor.
+
+            :attr:`kernel_size` (int, optional): the size of the kernel in the
+            output tensor. If not provided, :attr:`region_offset` should be
+            :attr:`RegionType.CUSTOM` and :attr:`region_offset` should be a 2D
+            matrix with size :math:`N\times D` such that it lists all :math:`N`
+            offsets in D-dimension.
+
+            :attr:`stride` (int, or list, optional): stride size of the
+            convolution layer. If non-identity is used, the output coordinates
+            will be at least :attr:`stride` :math:`\times` :attr:`tensor_stride`
+            away. When a list is given, the length must be D; each element will
+            be used for stride size for the specific axis.
+
+            :attr:`dilation` (int, or list, optional): dilation size for the
+            convolution kernel. When a list is given, the length must be D and
+            each element is an axis specific dilation. All elements must be > 0.
+
+            :attr:`bias` (bool, optional): if True, the convolution layer
+            has a bias.
+
+            :attr:`kernel_generator` (:attr:`MinkowskiEngine.KernelGenerator`,
+            optional): defines custom kernel shape.
+
+            :attr:`expand_coordinates` (bool, optional): Force generation of
+            new coordinates. When True, the output coordinates will be the
+            outer product of the kernel shape and the input coordinates.
+            `False` by default.
+
+            :attr:`dimension` (int): the spatial dimension of the space where
+            all the inputs and the network are defined. For example, images are
+            in a 2D space, meshes and 3D shapes are in a 3D space.
+
+        """
+        MinkowskiSeparableConvolutionBase.__init__(
+            self,
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            dilation,
+            bias,
+            kernel_generator,
+            is_transpose=False,
+            expand_coordinates=expand_coordinates,
+            convolution_mode=convolution_mode,
+            dimension=dimension,
+        )
+        self.reset_parameters()
+
 class MinkowskiConvolution(MinkowskiConvolutionBase):
     r"""Convolution layer for a sparse tensor.
 
