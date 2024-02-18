@@ -463,6 +463,7 @@ class MinkowskiNormalizedConvolution(MinkowskiConvolutionBase):
         expand_coordinates=False,
         convolution_mode=ConvolutionMode.DEFAULT,
         dimension=None,
+        detach_denorm=False,
     ):
         MinkowskiConvolutionBase.__init__(
             self,
@@ -479,7 +480,8 @@ class MinkowskiNormalizedConvolution(MinkowskiConvolutionBase):
             dimension=dimension,
         )
         self.reset_parameters()
-    
+        self.detach_denorm = detach_denorm
+
     def forward(
         self,
         input: SparseTensor,
@@ -526,6 +528,8 @@ class MinkowskiNormalizedConvolution(MinkowskiConvolutionBase):
                 input._manager,
             )
             kernel_norm = torch.sqrt(kernel_norm + 1e-8)
+            if self.detach_denorm:
+                kernel_norm = kernel_norm.detach()
             outfeat = outfeat / kernel_norm
 
         if self.bias is not None:
