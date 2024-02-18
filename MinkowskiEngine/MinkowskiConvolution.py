@@ -463,7 +463,7 @@ class MinkowskiNormalizedConvolution(MinkowskiConvolutionBase):
         expand_coordinates=False,
         convolution_mode=ConvolutionMode.DEFAULT,
         dimension=None,
-        detach_denorm=False,
+        denorm_detach=False,
     ):
         MinkowskiConvolutionBase.__init__(
             self,
