@@ -494,6 +494,18 @@ class MinkowskiSeparableConvolutionBase(MinkowskiModuleBase):
                 out_coordinate_map_key,
                 input._manager,
             )
+            with torch.no_grad():
+                geom_norm = self.conv.apply(
+                    torch.ones_like(input.F),
+                    torch.ones_like(self.kernel_geom),
+                    self.kernel_generator,
+                    self.convolution_mode,
+                    input.coordinate_map_key,
+                    out_coordinate_map_key,
+                    input._manager,
+                ) / self.in_channels
+                geom_factor = self.kernel_generator.kernel_volume / (geom_norm + 1e-8)
+
             assert geom_feat.shape[1] == 3
             kernel_x_expanded = self.kernel_feat_x.unsqueeze(2).expand(
                 -1, -1, self.kernel_size, -1, -1).contiguous().view(
@@ -537,7 +549,7 @@ class MinkowskiSeparableConvolutionBase(MinkowskiModuleBase):
             )
             outfeat = (feat_x * geom_feat[:, 0:1] + 
                        feat_y * geom_feat[:, 1:2] +
-                       feat_z * geom_feat[:, 2:3])
+                       feat_z * geom_feat[:, 2:3]) * geom_factor[:, 0:1]
 
         if self.bias is not None:
             outfeat += self.bias
