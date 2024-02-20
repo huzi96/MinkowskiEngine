@@ -120,6 +120,119 @@ class MinkowskiConvolutionFunction(Function):
             None,
         )
 
+class MinkowskiNormalizedConvolutionFunction(Function):
+    @staticmethod
+    def forward(
+        ctx,
+        input_features: torch.Tensor,
+        kernel_weights: torch.Tensor,
+        kernel_generator: KernelGenerator,
+        convolution_mode: ConvolutionMode,
+        in_coordinate_map_key: CoordinateMapKey,
+        out_coordinate_map_key: CoordinateMapKey = None,
+        coordinate_manager: CoordinateManager = None,
+    ):
+        if out_coordinate_map_key is None:
+            out_coordinate_map_key = CoordinateMapKey(
+                in_coordinate_map_key.get_coordinate_size()
+            )
+
+        input_features = input_features.contiguous()
+
+        ctx.input_features = input_features
+        ctx.kernel_weights = kernel_weights
+        ctx.misc = [
+            kernel_generator,
+            convolution_mode,
+            in_coordinate_map_key,
+            out_coordinate_map_key,
+            coordinate_manager,
+        ]
+
+        fw_fn = get_minkowski_function("ConvolutionForward", input_features)
+        feature_fw = fw_fn(
+            ctx.input_features,
+            kernel_weights,
+            kernel_generator.kernel_size,
+            kernel_generator.kernel_stride,
+            kernel_generator.kernel_dilation,
+            kernel_generator.region_type,
+            kernel_generator.region_offsets,
+            kernel_generator.expand_coordinates,
+            convolution_mode,
+            in_coordinate_map_key,
+            out_coordinate_map_key,
+            coordinate_manager._manager,
+        )
+        kernel_norm_fw = fw_fn(
+            torch.ones_like(input_features),
+            torch.abs(kernel_weights),
+            kernel_generator.kernel_size,
+            kernel_generator.kernel_stride,
+            kernel_generator.kernel_dilation,
+            kernel_generator.region_type,
+            kernel_generator.region_offsets,
+            kernel_generator.expand_coordinates,
+            convolution_mode,
+            in_coordinate_map_key,
+            out_coordinate_map_key,
+            coordinate_manager._manager,
+        )
+        kernel_norm_fw = (kernel_norm_fw + 1e-8)
+        return feature_fw / kernel_norm_fw
+
+    @staticmethod
+    def backward(ctx, grad_out_feat: torch.Tensor):
+        grad_out_feat = grad_out_feat.contiguous()
+        (
+            kernel_generator,
+            convolution_mode,
+            in_coordinate_map_key,
+            out_coordinate_map_key,
+            coordinate_manager,
+        ) = ctx.misc
+
+        bw_fn = get_minkowski_function("ConvolutionBackward", grad_out_feat)
+        grad_in_feat, grad_kernel = bw_fn(
+            ctx.input_features,
+            grad_out_feat,
+            ctx.kernel_weights,
+            kernel_generator.kernel_size,
+            kernel_generator.kernel_stride,
+            kernel_generator.kernel_dilation,
+            kernel_generator.region_type,
+            kernel_generator.region_offsets,
+            convolution_mode,
+            in_coordinate_map_key,
+            out_coordinate_map_key,
+            coordinate_manager._manager,
+        )
+        grad_in_norm, _ = bw_fn(
+            ctx.input_features,
+            torch.ones_like(grad_out_feat),
+            torch.abs(ctx.kernel_weights),
+            kernel_generator.kernel_size,
+            kernel_generator.kernel_stride,
+            kernel_generator.kernel_dilation,
+            kernel_generator.region_type,
+            kernel_generator.region_offsets,
+            convolution_mode,
+            in_coordinate_map_key,
+            out_coordinate_map_key,
+            coordinate_manager._manager,
+        )
+        
+        grad_in_feat = grad_in_feat / (grad_in_norm + 1e-8)
+
+        return (
+            grad_in_feat,
+            grad_kernel,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 class MinkowskiConvolutionTransposeFunction(Function):
     @staticmethod
@@ -811,66 +924,18 @@ class MinkowskiNormalizedConvolution(MinkowskiConvolutionBase):
         )
         self.reset_parameters()
         self.detach_denorm = denorm_detach
+        self.conv = MinkowskiNormalizedConvolutionFunction()
 
-    def forward(
-        self,
-        input: SparseTensor,
-        coordinates: Union[torch.Tensor, CoordinateMapKey, SparseTensor] = None,
-    ):
-        r"""
-        :attr:`input` (`MinkowskiEngine.SparseTensor`): Input sparse tensor to apply a
-        convolution on.
-
-        :attr:`coordinates` ((`torch.IntTensor`, `MinkowskiEngine.CoordinateMapKey`,
-        `MinkowskiEngine.SparseTensor`), optional): If provided, generate
-        results on the provided coordinates. None by default.
-
-        """
-        assert isinstance(input, SparseTensor)
-        assert input.D == self.dimension
-
-        if self.use_mm:
-            # If the kernel_size == 1, the convolution is simply a matrix
-            # multiplication
-            out_coordinate_map_key = input.coordinate_map_key
-            outfeat = input.F.mm(self.kernel)
-        else:
-            # Get a new coordinate_map_key or extract one from the coords
-            out_coordinate_map_key = _get_coordinate_map_key(
-                input, coordinates, self.kernel_generator.expand_coordinates
-            )
-            outfeat = self.conv.apply(
-                input.F,
-                self.kernel,
-                self.kernel_generator,
-                self.convolution_mode,
-                input.coordinate_map_key,
-                out_coordinate_map_key,
-                input._manager,
-            )
-            kernel_norm = self.conv.apply(
-                torch.ones_like(input.F),
-                self.kernel ** 2,
-                self.kernel_generator,
-                self.convolution_mode,
-                input.coordinate_map_key,
-                out_coordinate_map_key,
-                input._manager,
-            )
-            kernel_norm = torch.sqrt(kernel_norm + 1e-8)
-            if self.detach_denorm:
-                kernel_norm = kernel_norm.detach()
-            outfeat = outfeat / kernel_norm
-
-        if self.bias is not None:
-            outfeat += self.bias
-
-        return SparseTensor(
-            outfeat,
-            coordinate_map_key=out_coordinate_map_key,
-            coordinate_manager=input._manager,
-        )
-
+    def reset_parameters(self, is_transpose=False):
+        with torch.no_grad():
+            n = (
+                self.out_channels if is_transpose else self.in_channels
+            ) * self.kernel_generator.kernel_volume
+            stdv = 1.0 / math.sqrt(n)
+            if self.bias is not None:
+                self.bias.data.uniform_(-stdv, stdv)
+            torch.nn.init.normal_(
+                self.kernel, mean=1./self.in_channels, std=0.1)
 
 class MinkowskiConvolutionTranspose(MinkowskiConvolutionBase):
     r"""A generalized sparse transposed convolution or deconvolution layer."""
