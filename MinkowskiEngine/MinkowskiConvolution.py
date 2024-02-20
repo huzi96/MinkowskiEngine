@@ -906,7 +906,6 @@ class MinkowskiNormalizedConvolution(MinkowskiConvolutionBase):
         expand_coordinates=False,
         convolution_mode=ConvolutionMode.DEFAULT,
         dimension=None,
-        denorm_detach=False,
     ):
         MinkowskiConvolutionBase.__init__(
             self,
@@ -922,20 +921,164 @@ class MinkowskiNormalizedConvolution(MinkowskiConvolutionBase):
             convolution_mode=convolution_mode,
             dimension=dimension,
         )
+        Tensor = torch.FloatTensor
+        self.scale_factor = Parameter(Tensor(1, out_channels))
         self.reset_parameters()
-        self.detach_denorm = denorm_detach
         self.conv = MinkowskiNormalizedConvolutionFunction()
 
     def reset_parameters(self, is_transpose=False):
         with torch.no_grad():
-            n = (
-                self.out_channels if is_transpose else self.in_channels
-            ) * self.kernel_generator.kernel_volume
-            stdv = 1.0 / math.sqrt(n)
+            if self.use_mm:
+                fan_in = self.in_channels
+                fan_out = self.out_channels
+                a = math.sqrt(6.0 / (fan_in + fan_out))
+                torch.nn.init.uniform_(self.kernel, -a, a)
+            else:
+                fan_out = self.out_channels * self.kernel_generator.kernel_volume
+                a = math.sqrt(3.0 / fan_out)
+            stdv = 1.0 / math.sqrt(fan_out)
             if self.bias is not None:
                 self.bias.data.uniform_(-stdv, stdv)
-            torch.nn.init.normal_(
-                self.kernel, mean=1./self.in_channels, std=0.1)
+    
+    def forward(
+        self,
+        input: SparseTensor,
+        coordinates: Union[torch.Tensor, CoordinateMapKey, SparseTensor] = None,
+    ):
+        r"""
+        :attr:`input` (`MinkowskiEngine.SparseTensor`): Input sparse tensor to apply a
+        convolution on.
+
+        :attr:`coordinates` ((`torch.IntTensor`, `MinkowskiEngine.CoordinateMapKey`,
+        `MinkowskiEngine.SparseTensor`), optional): If provided, generate
+        results on the provided coordinates. None by default.
+
+        """
+        assert isinstance(input, SparseTensor)
+        assert input.D == self.dimension
+
+        if self.use_mm:
+            # If the kernel_size == 1, the convolution is simply a matrix
+            # multiplication
+            out_coordinate_map_key = input.coordinate_map_key
+            outfeat = input.F.mm(self.kernel)
+        else:
+            # Get a new coordinate_map_key or extract one from the coords
+            out_coordinate_map_key = _get_coordinate_map_key(
+                input, coordinates, self.kernel_generator.expand_coordinates
+            )
+            outfeat = self.conv.apply(
+                input.F,
+                self.kernel,
+                self.kernel_generator,
+                self.convolution_mode,
+                input.coordinate_map_key,
+                out_coordinate_map_key,
+                input._manager,
+            )
+        if self.bias is not None:
+            outfeat += self.bias
+
+        return SparseTensor(
+            outfeat,
+            coordinate_map_key=out_coordinate_map_key,
+            coordinate_manager=input._manager,
+        )
+
+class MinkowskiNormalizedFusionConvolution(MinkowskiConvolutionBase):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size=-1,
+        stride=1,
+        dilation=1,
+        bias=False,
+        kernel_generator=None,
+        expand_coordinates=False,
+        convolution_mode=ConvolutionMode.DEFAULT,
+        dimension=None,
+    ):
+        MinkowskiConvolutionBase.__init__(
+            self,
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            dilation,
+            bias,
+            kernel_generator,
+            is_transpose=False,
+            expand_coordinates=expand_coordinates,
+            convolution_mode=convolution_mode,
+            dimension=dimension,
+        )
+        Tensor = torch.FloatTensor
+        self.mm_kernel = Parameter(Tensor(out_channels, out_channels))
+        self.reset_parameters()
+        self.conv = MinkowskiNormalizedConvolutionFunction()
+
+    def reset_parameters(self, is_transpose=False):
+        with torch.no_grad():
+            if self.use_mm:
+                fan_in = self.in_channels
+                fan_out = self.out_channels
+                a = math.sqrt(6.0 / (fan_in + fan_out))
+                torch.nn.init.uniform_(self.kernel, -a, a)
+            else:
+                fan_out = self.out_channels * self.kernel_generator.kernel_volume
+                a = math.sqrt(3.0 / fan_out)
+            a = math.sqrt(6.0 / (self.out_channels + self.out_channels))
+            torch.nn.init.uniform_(self.mm_kernel, -a, a)
+            stdv = 1.0 / math.sqrt(fan_out)
+            if self.bias is not None:
+                self.bias.data.uniform_(-stdv, stdv)
+    
+    def forward(
+        self,
+        input: SparseTensor,
+        coordinates: Union[torch.Tensor, CoordinateMapKey, SparseTensor] = None,
+    ):
+        r"""
+        :attr:`input` (`MinkowskiEngine.SparseTensor`): Input sparse tensor to apply a
+        convolution on.
+
+        :attr:`coordinates` ((`torch.IntTensor`, `MinkowskiEngine.CoordinateMapKey`,
+        `MinkowskiEngine.SparseTensor`), optional): If provided, generate
+        results on the provided coordinates. None by default.
+
+        """
+        assert isinstance(input, SparseTensor)
+        assert input.D == self.dimension
+
+        if self.use_mm:
+            # If the kernel_size == 1, the convolution is simply a matrix
+            # multiplication
+            out_coordinate_map_key = input.coordinate_map_key
+            outfeat = input.F.mm(self.kernel)
+        else:
+            # Get a new coordinate_map_key or extract one from the coords
+            out_coordinate_map_key = _get_coordinate_map_key(
+                input, coordinates, self.kernel_generator.expand_coordinates
+            )
+            outfeat = self.conv.apply(
+                input.F,
+                self.kernel,
+                self.kernel_generator,
+                self.convolution_mode,
+                input.coordinate_map_key,
+                out_coordinate_map_key,
+                input._manager,
+            )
+        outfeat = outfeat.mm(self.mm_kernel)
+        if self.bias is not None:
+            outfeat += self.bias
+
+        return SparseTensor(
+            outfeat,
+            coordinate_map_key=out_coordinate_map_key,
+            coordinate_manager=input._manager,
+        )
 
 class MinkowskiConvolutionTranspose(MinkowskiConvolutionBase):
     r"""A generalized sparse transposed convolution or deconvolution layer."""
