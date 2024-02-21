@@ -936,6 +936,7 @@ class MinkowskiNormalizedConvolution(MinkowskiConvolutionBase):
             else:
                 fan_out = self.out_channels * self.kernel_generator.kernel_volume
                 a = math.sqrt(3.0 / fan_out)
+                torch.nn.init.uniform_(self.kernel, -a, a)
             stdv = 1.0 / math.sqrt(fan_out)
             if self.bias is not None:
                 self.bias.data.uniform_(-stdv, stdv)
@@ -1028,6 +1029,7 @@ class MinkowskiNormalizedFusionConvolution(MinkowskiConvolutionBase):
             else:
                 fan_out = self.out_channels * self.kernel_generator.kernel_volume
                 a = math.sqrt(3.0 / fan_out)
+                torch.nn.init.uniform_(self.kernel, -a, a)
             a = math.sqrt(6.0 / (self.out_channels + self.out_channels))
             torch.nn.init.uniform_(self.mm_kernel, -a, a)
             stdv = 1.0 / math.sqrt(fan_out)
