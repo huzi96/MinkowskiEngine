@@ -553,14 +553,21 @@ class MinkowskiSeparableConvolutionBase(MinkowskiModuleBase):
             self.kernel = Parameter(Tensor(*kernel_shape))
         else:
             self.kernel_geom = Parameter(Tensor(*geom_kernel_shape))
-            feat_kernel_shape_2d = (
-                kernel_size, kernel_size, self.in_channels, self.out_channels)
             self.kernel_feat_x = Parameter(
-                Tensor(*feat_kernel_shape_2d))
+                Tensor(
+                    (kernel_size, kernel_size, 1,
+                     self.in_channels, self.out_channels))
+                )
             self.kernel_feat_y = Parameter(
-                Tensor(*feat_kernel_shape_2d))
+                Tensor(
+                    (kernel_size, 1, kernel_size,
+                     self.in_channels, self.out_channels))
+                )
             self.kernel_feat_z = Parameter(
-                Tensor(*feat_kernel_shape_2d))
+                Tensor(
+                    (1, kernel_size, kernel_size,
+                     self.in_channels, self.out_channels))
+                )
         
         self.bias = Parameter(Tensor(1, out_channels)) if bias else None
         self.convolution_mode = convolution_mode
@@ -607,32 +614,19 @@ class MinkowskiSeparableConvolutionBase(MinkowskiModuleBase):
                 out_coordinate_map_key,
                 input._manager,
             )
-            with torch.no_grad():
-                geom_norm = self.conv.apply(
-                    torch.ones_like(input.F),
-                    torch.ones_like(self.kernel_geom),
-                    self.kernel_generator,
-                    self.convolution_mode,
-                    input.coordinate_map_key,
-                    out_coordinate_map_key,
-                    input._manager,
-                ) / self.in_channels
-                geom_factor = self.kernel_generator.kernel_volume / (geom_norm + 1e-8)
 
             assert geom_feat.shape[1] == 3
-            kernel_x_expanded = self.kernel_feat_x.unsqueeze(2).expand(
-                -1, -1, self.kernel_size, -1, -1).contiguous().view(
-                    self.kernel_size ** 3, self.in_channels, self.out_channels
-                )
-            kernel_y_expanded = self.kernel_feat_y.unsqueeze(1).expand(
-                -1, self.kernel_size, -1, -1, -1).contiguous().view(
-                    self.kernel_size ** 3, self.in_channels, self.out_channels
-                )
-            kernel_z_expanded = self.kernel_feat_z.unsqueeze(0).expand(
-                self.kernel_size, -1, -1, -1, -1).contiguous().view(
-                    self.kernel_size ** 3, self.in_channels, self.out_channels
-                )
-            
+
+            kernel_x_expanded = self.kernel_feat_x.expand(
+                self.kernel_size, self.kernel_size, self.kernel_size, -1, -1
+            ).contiguous().view(-1, self.in_channels, self.out_channels)
+            kernel_y_expanded = self.kernel_feat_y.expand(
+                self.kernel_size, self.kernel_size, self.kernel_size, -1, -1
+            ).contiguous().view(-1, self.in_channels, self.out_channels)
+            kernel_z_expanded = self.kernel_feat_z.expand(
+                self.kernel_size, self.kernel_size, self.kernel_size, -1, -1
+            ).contiguous().view(-1, self.in_channels, self.out_channels)
+
             feat_x = self.conv.apply(
                 input.F,
                 kernel_x_expanded,
@@ -660,9 +654,42 @@ class MinkowskiSeparableConvolutionBase(MinkowskiModuleBase):
                 out_coordinate_map_key,
                 input._manager,
             )
+
+            kernel_norm_x = self.conv.apply(
+                torch.ones_like(input.F),
+                torch.abs(kernel_x_expanded),
+                self.kernel_generator,
+                self.convolution_mode,
+                input.coordinate_map_key,
+                out_coordinate_map_key,
+                input._manager,
+            )
+            kernel_norm_y = self.conv.apply(
+                torch.ones_like(input.F),
+                torch.abs(kernel_y_expanded),
+                self.kernel_generator,
+                self.convolution_mode,
+                input.coordinate_map_key,
+                out_coordinate_map_key,
+                input._manager,
+            )
+            kernel_norm_z = self.conv.apply(
+                torch.ones_like(input.F),
+                torch.abs(kernel_z_expanded),
+                self.kernel_generator,
+                self.convolution_mode,
+                input.coordinate_map_key,
+                out_coordinate_map_key,
+                input._manager,
+            )
+
+            feat_x = feat_x / (kernel_norm_x + 1e-8)
+            feat_y = feat_y / (kernel_norm_y + 1e-8)
+            feat_z = feat_z / (kernel_norm_z + 1e-8)
+
             outfeat = (feat_x * geom_feat[:, 0:1] + 
                        feat_y * geom_feat[:, 1:2] +
-                       feat_z * geom_feat[:, 2:3]) * geom_factor[:, 0:1]
+                       feat_z * geom_feat[:, 2:3])
 
         if self.bias is not None:
             outfeat += self.bias
