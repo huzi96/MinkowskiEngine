@@ -555,17 +555,17 @@ class MinkowskiSeparableConvolutionBase(MinkowskiModuleBase):
             self.kernel_geom = Parameter(Tensor(*geom_kernel_shape))
             self.kernel_feat_x = Parameter(
                 Tensor(
-                    (kernel_size, kernel_size, 1,
+                    *(kernel_size, kernel_size, 1,
                      self.in_channels, self.out_channels))
                 )
             self.kernel_feat_y = Parameter(
                 Tensor(
-                    (kernel_size, 1, kernel_size,
+                    *(kernel_size, 1, kernel_size,
                      self.in_channels, self.out_channels))
                 )
             self.kernel_feat_z = Parameter(
                 Tensor(
-                    (1, kernel_size, kernel_size,
+                    *(1, kernel_size, kernel_size,
                      self.in_channels, self.out_channels))
                 )
         
