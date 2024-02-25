@@ -104,6 +104,7 @@ from MinkowskiConvolution import (
     MinkowskiConvolutionTranspose,
     MinkowskiGenerativeConvolutionTranspose,
     MinkowskiNormalizedConvolution,
+    MinkowskiNormalizedConvolutionTranspose
 )
 
 
