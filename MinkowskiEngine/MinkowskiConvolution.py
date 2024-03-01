@@ -794,3 +794,77 @@ class MinkowskiGenerativeConvolutionTranspose(MinkowskiConvolutionBase):
             dimension=dimension,
         )
         self.reset_parameters(True)
+
+class MinkowskiGenerativeNormalizedConvolutionTranspose(MinkowskiGenerativeConvolutionTranspose):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size=-1,
+        stride=1,
+        dilation=1,
+        bias=False,
+        kernel_generator=None,
+        convolution_mode=ConvolutionMode.DEFAULT,
+        dimension=None,
+    ):
+        MinkowskiGenerativeConvolutionTranspose.__init__(
+            self,
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            dilation,
+            bias,
+            kernel_generator,
+            convolution_mode,
+            dimension,
+        )
+    
+    def forward(
+        self,
+        input: SparseTensor,
+        coordinates: Union[torch.Tensor, CoordinateMapKey, SparseTensor] = None,
+    ):
+        assert isinstance(input, SparseTensor)
+        assert input.D == self.dimension
+
+        if self.use_mm:
+            # If the kernel_size == 1, the convolution is simply a matrix
+            # multiplication
+            out_coordinate_map_key = input.coordinate_map_key
+            outfeat = input.F.mm(self.kernel)
+        else:
+            # Get a new coordinate_map_key or extract one from the coords
+            out_coordinate_map_key = _get_coordinate_map_key(
+                input, coordinates, self.kernel_generator.expand_coordinates
+            )
+            outfeat = self.conv.apply(
+                input.F,
+                self.kernel,
+                self.kernel_generator,
+                self.convolution_mode,
+                input.coordinate_map_key,
+                out_coordinate_map_key,
+                input._manager,
+            )
+            kernel_norm = self.conv.apply(
+                torch.ones_like(input.F),
+                self.kernel ** 2,
+                self.kernel_generator,
+                self.convolution_mode,
+                input.coordinate_map_key,
+                out_coordinate_map_key,
+                input._manager,
+            )
+            kernel_norm = torch.sqrt(kernel_norm + 1e-8)
+            outfeat = outfeat / kernel_norm
+
+        if self.bias is not None:
+            outfeat += self.bias
+
+        return SparseTensor(
+            outfeat,
+            coordinate_map_key=out_coordinate_map_key,
+            coordinate_manager=input._manager,
+        )
