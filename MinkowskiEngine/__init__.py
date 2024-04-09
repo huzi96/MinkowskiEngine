@@ -105,7 +105,8 @@ from MinkowskiConvolution import (
     MinkowskiGenerativeConvolutionTranspose,
     MinkowskiNormalizedConvolution,
     MinkowskiNormalizedConvolutionTranspose,
-    MinkowskiGenerativeNormalizedConvolutionTranspose
+    MinkowskiGenerativeNormalizedConvolutionTranspose,
+    TrilinearUpsampler
 )
 
 
