@@ -900,38 +900,38 @@ class TrilinearUpsampler(MinkowskiGenerativeNormalizedConvolutionTranspose):
             linear_3d_kernel = torch.einsum('ij,jlk->ilk', linear_1d_kernel.T, linear_2d_kernel).reshape(27)
             for i in range(self.in_channels):
                 self.kernel[:, i, i] = linear_3d_kernel
+            self.kernel.requires_grad = False
     
     def forward(self, input: SparseTensor, coordinates: Union[torch.Tensor, CoordinateMapKey, SparseTensor] = None):
-        with torch.no_grad():
-            assert isinstance(input, SparseTensor)
-            assert input.D == self.dimension
+        assert isinstance(input, SparseTensor)
+        assert input.D == self.dimension
 
-            # Get a new coordinate_map_key or extract one from the coords
-            out_coordinate_map_key = _get_coordinate_map_key(
-                input, coordinates, self.kernel_generator.expand_coordinates
-            )
-            outfeat = self.conv.apply(
-                input.F,
-                self.kernel,
-                self.kernel_generator,
-                self.convolution_mode,
-                input.coordinate_map_key,
-                out_coordinate_map_key,
-                input._manager,
-            )
-            kernel_norm = self.conv.apply(
-                torch.ones_like(input.F),
-                self.kernel,
-                self.kernel_generator,
-                self.convolution_mode,
-                input.coordinate_map_key,
-                out_coordinate_map_key,
-                input._manager,
-            )
-            outfeat = outfeat / kernel_norm
+        # Get a new coordinate_map_key or extract one from the coords
+        out_coordinate_map_key = _get_coordinate_map_key(
+            input, coordinates, self.kernel_generator.expand_coordinates
+        )
+        outfeat = self.conv.apply(
+            input.F,
+            self.kernel,
+            self.kernel_generator,
+            self.convolution_mode,
+            input.coordinate_map_key,
+            out_coordinate_map_key,
+            input._manager,
+        )
+        kernel_norm = self.conv.apply(
+            torch.ones_like(input.F),
+            self.kernel,
+            self.kernel_generator,
+            self.convolution_mode,
+            input.coordinate_map_key,
+            out_coordinate_map_key,
+            input._manager,
+        )
+        outfeat = outfeat / kernel_norm
 
-            return SparseTensor(
-                outfeat,
-                coordinate_map_key=out_coordinate_map_key,
-                coordinate_manager=input._manager,
-            )
+        return SparseTensor(
+            outfeat,
+            coordinate_map_key=out_coordinate_map_key,
+            coordinate_manager=input._manager,
+        )
